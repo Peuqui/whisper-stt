@@ -40,14 +40,18 @@ services:
       - DIARIZE_MIN_VRAM_MIB=${DIARIZE_MIN_VRAM_MIB:-1500}
       - DIARIZE_TTL_MINUTES=${DIARIZE_TTL_MINUTES:-10}
       # Optional override — normally unset: the token is read from the
-      # mounted host token file below (single source of truth).
+      # host's token file through the mount below (single source of truth).
       - HF_TOKEN=${HF_TOKEN:-}
+      - HF_TOKEN_PATH=/hf-host/token
     volumes:
       # Persistent HuggingFace model cache
       - whisper_models:/root/.cache/huggingface
       # pyannote models are gated — reuse the host's HF token instead of
-      # copying it into .env. Read-only, overlays the volume at that path.
-      - ${HOME}/.cache/huggingface/token:/root/.cache/huggingface/token:ro
+      # copying it into .env. The directory, not the file: a missing file
+      # would make Docker create a directory in its place, and every
+      # huggingface_hub call then failed with IsADirectoryError. A missing
+      # token now simply means no token.
+      - ${HOME}/.cache/huggingface:/hf-host:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5052/health"]
       interval: 30s

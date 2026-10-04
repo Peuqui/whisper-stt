@@ -25,9 +25,9 @@ and [Agent-Orc](https://github.com/Peuqui/Agent-Orc) use it for voice input.
 - For speaker diarization only: a Hugging Face token with access to the pyannote models,
   stored in `~/.cache/huggingface/token` (for example via `huggingface-cli login`)
 
-The compose file mounts `~/.cache/huggingface/token` into the container. If that file does not
-exist, Docker creates an empty directory in its place; create the token file first if you
-want diarization.
+The compose file mounts `~/.cache/huggingface` read-only and reads the token from there.
+Without a token file everything except diarization works as usual; add the token any time
+and restart the container.
 
 ## Start
 

@@ -25,9 +25,9 @@ und [Agent-Orc](https://github.com/Peuqui/Agent-Orc) nutzen ihn für die Sprache
 - Nur für die Sprechererkennung: ein Hugging-Face-Token mit Zugriff auf die pyannote-Modelle,
   abgelegt in `~/.cache/huggingface/token` (z. B. per `huggingface-cli login`)
 
-Die Compose-Datei bindet `~/.cache/huggingface/token` in den Container ein. Fehlt die Datei,
-legt Docker an ihrer Stelle einen leeren Ordner an; für die Sprechererkennung also vorher die
-Token-Datei anlegen.
+Die Compose-Datei bindet `~/.cache/huggingface` schreibgeschützt ein und liest das Token von
+dort. Ohne Token-Datei funktioniert alles außer der Sprechererkennung wie gewohnt; das Token
+lässt sich jederzeit nachtragen, danach den Container neu starten.
 
 ## Start
 
