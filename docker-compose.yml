@@ -21,6 +21,9 @@ services:
       # falls back to smaller ones when no card has room. CPU keeps the
       # WHISPER_MODEL default — large on CPU would be painfully slow.
       - WHISPER_GPU_MODEL=${WHISPER_GPU_MODEL:-large-v3}
+      # The degradation chain stops here; below it the GPU answers 503 instead of loading
+      # a model too weak to be useful (small and below transcribe poorly).
+      - WHISPER_GPU_MIN_MODEL=${WHISPER_GPU_MIN_MODEL:-medium}
       # Compute type per device (int8 for CPU, float16 for GPU)
       - WHISPER_CPU_COMPUTE=int8
       - WHISPER_GPU_COMPUTE=float16

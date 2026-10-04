@@ -94,6 +94,8 @@ EAGER_LOAD = os.environ.get("WHISPER_EAGER_LOAD", "1") in ("1", "true", "True")
 
 # Minimum free VRAM (MiB) to load GPU model. Whisper medium ≈ 1500 MiB.
 _MIN_VRAM_MIB = int(os.environ.get("WHISPER_MIN_VRAM_MIB", "2000"))
+# Smallest model the GPU degradation chain may fall back to (see _start_gpu_worker).
+GPU_MIN_MODEL = os.environ.get("WHISPER_GPU_MIN_MODEL", "medium")
 
 # Per-model VRAM demand (MiB, float16 incl. CUDA context headroom). Used by
 # the degradation chain in _start_gpu_worker: the configured model is tried
@@ -368,15 +370,18 @@ def _start_gpu_worker() -> bool:
     """Start GPU child process on the best available GPU.
 
     Tries the configured model first; when no GPU has enough free VRAM for
-    it, walks down the model list and loads the largest one that fits
-    (agreed degradation, logged loudly). Only when not even the smallest
-    model fits does this report failure and the caller falls back to CPU.
+    it, walks down the model list, but not below GPU_MIN_MODEL, and loads
+    the largest one that fits (agreed degradation, logged loudly). When
+    none fits it reports failure; the caller then decides about the CPU.
     """
     global _gpu_process, _gpu_request_queue, _gpu_result_queue, _gpu_device_index, _gpu_model_name, _gpu_uuid
 
     configured = _config["gpu_model"]
     chain_start = AVAILABLE_MODELS.index(configured) if configured in AVAILABLE_MODELS else 0
-    candidates = list(reversed(AVAILABLE_MODELS[:chain_start + 1]))
+    # Never below the floor: smaller models transcribe too poorly to be worth it, the CPU
+    # with its better model is the caller's choice then.
+    chain_end = min(AVAILABLE_MODELS.index(GPU_MIN_MODEL), chain_start)
+    candidates = list(reversed(AVAILABLE_MODELS[chain_end:chain_start + 1]))
 
     selected = None
     model_name = configured
