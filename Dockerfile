@@ -9,18 +9,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python dependencies
 # faster-whisper uses CTranslate2 (optimized C++ inference)
 # nvidia-cublas-cu12 + nvidia-cudnn-cu12 = GPU runtime libs (libcublas.so.12, libcudnn.so.9)
-# faster-whisper and its audio decoder PyAV are pinned: an unpinned rebuild (2026-10-04) pulled
-# PyAV 19, which no longer accepts the metadata_errors argument faster-whisper 1.2.1 passes, and
-# every transcription failed. These versions are tested together.
+# Every package is pinned: an unpinned rebuild (2026-10-04) pulled PyAV 19, which no longer
+# accepts the metadata_errors argument faster-whisper 1.2.1 passes, and every transcription
+# failed. These versions are tested together.
 RUN pip install --no-cache-dir \
-    flask \
-    gunicorn \
+    flask==3.1.3 \
+    gunicorn==26.2.0 \
     faster-whisper==1.2.1 \
     av==18.1.0 \
     ctranslate2==4.8.2 \
-    numpy \
-    nvidia-cublas-cu12 \
-    nvidia-cudnn-cu12
+    numpy==2.5.3 \
+    nvidia-cublas-cu12==12.6.4.1 \
+    nvidia-cudnn-cu12==9.10.2.21
 
 # Speaker diarization (optional feature, own worker process on its own GPU).
 # pyannote.audio pulls in torch/torchaudio — deliberately kept in the SAME
@@ -40,7 +40,7 @@ RUN pip install --no-cache-dir \
 # default build in again.
 RUN pip install --no-cache-dir torch==2.8.0 torchaudio==2.8.0 \
         --index-url https://download.pytorch.org/whl/cu126 \
- && pip install --no-cache-dir pyannote.audio \
+ && pip install --no-cache-dir pyannote.audio==4.0.7 \
  && pip install --no-cache-dir --force-reinstall torch==2.8.0 torchaudio==2.8.0 \
         --index-url https://download.pytorch.org/whl/cu126
 
