@@ -1,12 +1,14 @@
 # whisper-stt
 
 Speech-to-text as a small HTTP service in Docker, built on
-[faster-whisper](https://github.com/SYSTRAN/faster-whisper). One running container serves
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) and NVIDIA
+[Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3). One running container serves
 every client on the machine — [AIfred Intelligence](https://github.com/Peuqui/AIfred-Intelligence)
 and [Agent-Orc](https://github.com/Peuqui/Agent-Orc) use it for voice input.
 
 [Deutsche Version](README.de.md)
 
+- **Two engines, chosen per request:** Whisper or Parakeet (see below).
 - **CPU and GPU, chosen per request.** The CPU model stays loaded all the time (no load time,
   no VRAM). The GPU model is loaded on demand into the card with the most free VRAM and
   released again after a configurable idle time.
@@ -60,6 +62,8 @@ and survive rebuilds. The container restarts with Docker (`restart: unless-stopp
 | `language` | Language code such as `de` or `en`; default from the configuration |
 | `diarize` | `1` to label speakers (default off) |
 | `num_speakers` | Optional hint when the number of speakers is known |
+| `engine` | `whisper` or `parakeet`; default `STT_ENGINE` |
+| `quality` | Parakeet only: `fp32` or `int8`; default `STT_QUALITY` |
 
 The answer is JSON with `text`, the time taken and the device used. Errors: `400` for a
 missing file or an invalid device, `503` when no GPU has room for a model, `500` otherwise.
@@ -83,8 +87,33 @@ Set in `docker-compose.yml` or as environment variables when starting compose:
 | `WHISPER_EAGER_LOAD` | `1` | Load the CPU model at start |
 | `WHISPER_CPU_COMPUTE` / `WHISPER_GPU_COMPUTE` | `int8` / `float16` | Compute types |
 | `DIARIZE_MODEL` | `pyannote/speaker-diarization-community-1` | Diarization pipeline |
+| `STT_ENGINE` | `whisper` | Engine when a request names none: `whisper` or `parakeet` |
+| `STT_QUALITY` | `fp32` | Parakeet quality when a request names none: `fp32` or `int8` |
+| `PARAKEET_CHUNK_S` / `PARAKEET_MERGE_SILENCE_MS` | `60` / `5000` | Parakeet cuts audio at speech pauses into chunks of at most this length, merging pauses shorter than this |
+| `PARAKEET_MIN_VRAM_MIB` | `4500` | Free VRAM a card needs for Parakeet |
 
 Available models: `tiny`, `base`, `small`, `medium`, `large-v3`.
+
+## Choosing an engine
+
+Measured on four one-minute excerpts of German audiobooks (different narrators); seconds per
+minute of audio, lower is better:
+
+| Engine | Device | Time (s) |
+|---|---|---|
+| Parakeet fp32 | GPU (V100) | 0.25 |
+| Whisper large-v3 | GPU | 2.0–3.7 |
+| Parakeet int8 | CPU | 2.5–3.8 |
+| Parakeet fp32 | CPU | 2.8–5.1 |
+| Whisper medium | CPU | 12.5–22.7 |
+
+Quality, read by hand: Whisper large-v3 is best on names and grammar, but on one excerpt it
+(and Whisper medium) dropped half the text. Parakeet fp32 came close to large-v3 and never
+dropped anything; int8 makes more word errors (about Whisper medium's level). Parakeet covers
+25 European languages and detects the language itself — for other languages use Whisper.
+
+Parakeet needs no Hugging Face token; its model (≈3 GB, both qualities) is downloaded into
+the model volume on first use.
 
 ## License
 

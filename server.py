@@ -37,6 +37,10 @@ app = Flask(__name__)
 # ── Configuration (mutable at runtime via /config) ───────────
 
 AVAILABLE_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
+# Engines per request: Whisper (faster-whisper) or NVIDIA Parakeet TDT 0.6B v3
+# (onnx-asr). Parakeet quality: fp32 (full) or int8 (smaller, more word errors).
+ENGINES = ["whisper", "parakeet"]
+PARAKEET_QUALITIES = ["fp32", "int8"]
 
 _default_model = os.environ.get("WHISPER_MODEL", "medium")
 
@@ -63,6 +67,10 @@ _config = {
     # Per-request num_speakers still wins. Set to 2 before transcribing an
     # interview and the greeting ping-pong stops collapsing into one speaker.
     "num_speakers": int(os.environ.get("WHISPER_NUM_SPEAKERS", "0")),
+    # Default engine/quality when a request names none — the API stays
+    # unchanged for clients that never send these fields.
+    "engine": os.environ.get("STT_ENGINE", "whisper"),
+    "quality": os.environ.get("STT_QUALITY", "fp32"),
 }
 
 # Whisper continues whatever "style" the transcript has so far. At the very
@@ -195,6 +203,113 @@ def _transcribe_cpu(audio_path: str, language: str, return_segments: bool = Fals
     return payload
 
 
+# ── Parakeet (onnx-asr) ──────────────────────────────────────
+#
+# Measured on German audiobooks (4 × 60 s): fp32 matches Whisper large-v3
+# closely and never dropped text where Whisper skipped half a paragraph;
+# CPU ≈ 5 s per audio minute (Whisper medium 12–23 s), V100 ≈ 0.25 s.
+
+_PARAKEET_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx"
+# A real directory inside the HF volume: onnxruntime refuses the fp32
+# encoder's external weight file behind the HF cache's blob symlinks.
+_PARAKEET_DIR = Path(os.environ.get("PARAKEET_DIR", "/root/.cache/huggingface/parakeet-tdt-0.6b-v3"))
+# VRAM for one chunk (measured peak ≈ 3.9 GB on a 60 s chunk, fp32).
+_PARAKEET_VRAM_MIB = int(os.environ.get("PARAKEET_MIN_VRAM_MIB", "4500"))
+# Audio is cut at speech pauses into chunks of at most this length, so VRAM
+# does not grow with the recording. Short pieces hurt: below ~20 s the model
+# loses context (names garbled, stray English words), so pauses shorter
+# than PARAKEET_MERGE_SILENCE_MS are merged up to the chunk length.
+_PARAKEET_CHUNK_S = float(os.environ.get("PARAKEET_CHUNK_S", "60"))
+_PARAKEET_MERGE_SILENCE_MS = float(os.environ.get("PARAKEET_MERGE_SILENCE_MS", "5000"))
+_parakeet_download_lock = threading.Lock()
+
+
+def _parakeet_model_dir() -> str:
+    """The model files, downloaded once into the HF volume."""
+    with _parakeet_download_lock:
+        if not (_PARAKEET_DIR / "config.json").exists():
+            from huggingface_hub import snapshot_download
+            print(f"[Parakeet] Downloading {_PARAKEET_REPO} → {_PARAKEET_DIR}", flush=True)
+            snapshot_download(_PARAKEET_REPO, local_dir=str(_PARAKEET_DIR))
+    return str(_PARAKEET_DIR)
+
+
+def _load_parakeet(quality: str, provider: str):
+    """Parakeet with VAD chunking and timestamps on one onnxruntime provider.
+
+    onnxruntime falls back to the CPU silently when CUDA cannot load (wrong
+    CUDA/cuDNN) — checked here, so a "GPU" worker never computes on the CPU.
+    """
+    import onnx_asr
+    t0 = time.time()
+    model = onnx_asr.load_model(
+        "nemo-parakeet-tdt-0.6b-v3", _parakeet_model_dir(),
+        quantization="int8" if quality == "int8" else None, providers=[provider],
+    )
+    active = model.asr._encoder.get_providers()[0]
+    if active != provider:
+        raise RuntimeError(f"Parakeet runs on {active}, not {provider}")
+    vad = onnx_asr.load_vad("silero", providers=["CPUExecutionProvider"])
+    print(f"[Parakeet] Loaded {quality} on {provider} in {time.time() - t0:.1f}s", flush=True)
+    return model.with_vad(vad, max_speech_duration_s=_PARAKEET_CHUNK_S,
+                          min_silence_duration_ms=_PARAKEET_MERGE_SILENCE_MS).with_timestamps()
+
+
+def _parakeet_transcribe(model, wav_path: str, want_words: bool) -> tuple[str, list]:
+    """Text, plus (start, end, word) for the speaker merge when asked.
+
+    Tokens are word pieces; a new word starts with a space. Token times are
+    relative to their chunk, so the chunk start is added.
+    """
+    texts: list[str] = []
+    words: list[tuple[float, float, str]] = []
+    for seg in model.recognize(wav_path):
+        if seg.text.strip():
+            texts.append(seg.text.strip())
+        if not want_words:
+            continue
+        current: list | None = None
+        for token, rel in zip(seg.tokens, seg.timestamps):
+            at = seg.start + rel
+            if current is None or token.startswith(" "):
+                if current:
+                    words.append(tuple(current))
+                current = [at, at, token]
+            else:
+                current[1] = at
+                current[2] += token
+        if current:
+            words.append(tuple(current))
+    return " ".join(texts), words
+
+
+_parakeet_cpu = None
+_parakeet_cpu_quality = ""
+_parakeet_cpu_lock = threading.Lock()
+
+
+def _transcribe_parakeet_cpu(wav_path: str, language: str, quality: str,
+                             return_segments: bool = False) -> dict:
+    """Parakeet on the CPU (main process, stays loaded like Whisper's)."""
+    global _parakeet_cpu, _parakeet_cpu_quality
+    with _parakeet_cpu_lock:
+        if _parakeet_cpu is None or _parakeet_cpu_quality != quality:
+            _parakeet_cpu = _load_parakeet(quality, "CPUExecutionProvider")
+            _parakeet_cpu_quality = quality
+        model = _parakeet_cpu
+    t0 = time.time()
+    text, words = _parakeet_transcribe(model, wav_path, return_segments)
+    elapsed = time.time() - t0
+    print(f"[Parakeet] Transcribed (cpu, {quality}, {elapsed:.2f}s): {text[:80]}...", flush=True)
+    payload = {"text": text, "time": round(elapsed, 3), "device": "cpu",
+               "engine": "parakeet", "quality": quality,
+               # Parakeet detects the language itself and reports none.
+               "language": language, "language_probability": None}
+    if return_segments:
+        payload["segments"] = words
+    return payload
+
+
 # ── GPU Worker (child process, killed after TTL) ─────────────
 
 _gpu_process: multiprocessing.Process | None = None
@@ -207,6 +322,8 @@ _last_gpu_request = 0.0
 _gpu_device_index: int | None = None
 _gpu_uuid: str = ""  # UUID of the card Whisper sits on (diarization avoids it)
 _gpu_model_name: str = ""  # Track which model is loaded on GPU
+_gpu_engine: str = ""  # whisper | parakeet — the worker holds one engine
+_gpu_quality: str = ""  # Parakeet quality of the loaded worker
 
 
 def _find_best_gpu(min_vram_mib: int | None = None,
@@ -294,19 +411,27 @@ def _detect_gpu_compute(gpu_idx: int) -> str:
 
 
 def _gpu_worker(req_queue: multiprocessing.Queue, res_queue: multiprocessing.Queue,
-                gpu_idx: int, gpu_uuid: str, model_name: str, compute: str):
+                gpu_idx: int, gpu_uuid: str, model_name: str, compute: str,
+                engine: str = "whisper", quality: str = "fp32"):
     """Child process: load model on GPU, process requests until killed."""
     # Pin by UUID (SSOT, same as llama-swap profiles) — immune to CUDA's
     # enumeration order, which differs from nvidia-smi on mixed-GPU hosts.
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_uuid
     print(f"[Whisper/GPU] Worker started on GPU {gpu_idx} ({gpu_uuid}, PID {os.getpid()})", flush=True)
 
-    from faster_whisper import WhisperModel
-
     t0 = time.time()
-    print(f"[Whisper/GPU] Loading model '{model_name}' ({compute})...", flush=True)
-    model = WhisperModel(model_name, device="cuda", compute_type=compute, device_index=0)
-    print(f"[Whisper/GPU] Model loaded in {time.time() - t0:.1f}s", flush=True)
+    try:
+        if engine == "parakeet":
+            model = _load_parakeet(quality, "CUDAExecutionProvider")
+        else:
+            from faster_whisper import WhisperModel
+            print(f"[Whisper/GPU] Loading model '{model_name}' ({compute})...", flush=True)
+            model = WhisperModel(model_name, device="cuda", compute_type=compute, device_index=0)
+    except Exception as e:
+        print(f"[Whisper/GPU] Loading {engine} failed: {e}", flush=True)
+        res_queue.put({"status": "failed", "error": str(e)})
+        return
+    print(f"[Whisper/GPU] {engine} loaded in {time.time() - t0:.1f}s", flush=True)
 
     # Signal parent that we're ready
     res_queue.put({"status": "ready"})
@@ -326,6 +451,17 @@ def _gpu_worker(req_queue: multiprocessing.Queue, res_queue: multiprocessing.Que
         try:
             t0 = time.time()
             want_words = bool(job.get("return_segments"))
+            if engine == "parakeet":
+                text, words = _parakeet_transcribe(model, audio_path, want_words)
+                elapsed = time.time() - t0
+                print(f"[Parakeet/GPU] Transcribed ({quality}, {elapsed:.2f}s): {text[:80]}...", flush=True)
+                payload = {"text": text, "time": round(elapsed, 3), "device": "cuda",
+                           "engine": "parakeet", "quality": quality,
+                           "language": language, "language_probability": None}
+                if want_words:
+                    payload["segments"] = words
+                res_queue.put(payload)
+                continue
             segments, info = model.transcribe(
                 audio_path,
                 language=language if language != "auto" else None,
@@ -366,15 +502,23 @@ def _gpu_worker(req_queue: multiprocessing.Queue, res_queue: multiprocessing.Que
     print(f"[Whisper/GPU] Worker exiting (PID {os.getpid()})", flush=True)
 
 
-def _start_gpu_worker() -> bool:
+def _start_gpu_worker(engine: str = "whisper", quality: str = "fp32") -> bool:
     """Start GPU child process on the best available GPU.
 
-    Tries the configured model first; when no GPU has enough free VRAM for
-    it, walks down the model list, but not below GPU_MIN_MODEL, and loads
-    the largest one that fits (agreed degradation, logged loudly). When
-    none fits it reports failure; the caller then decides about the CPU.
+    Whisper: tries the configured model first; when no GPU has enough free
+    VRAM for it, walks down the model list, but not below GPU_MIN_MODEL, and
+    loads the largest one that fits (agreed degradation, logged loudly).
+    Parakeet: one model, needs _PARAKEET_VRAM_MIB. When nothing fits it
+    reports failure; the caller then decides about the CPU.
     """
     global _gpu_process, _gpu_request_queue, _gpu_result_queue, _gpu_device_index, _gpu_model_name, _gpu_uuid
+    global _gpu_engine, _gpu_quality
+
+    if engine == "parakeet":
+        selected = _find_best_gpu(min_vram_mib=_PARAKEET_VRAM_MIB, tag="Parakeet")
+        if selected is None:
+            return False
+        return _spawn_gpu_worker(selected, f"parakeet-{quality}", "", engine, quality)
 
     configured = _config["gpu_model"]
     chain_start = AVAILABLE_MODELS.index(configured) if configured in AVAILABLE_MODELS else 0
@@ -396,34 +540,43 @@ def _start_gpu_worker() -> bool:
             break
     if selected is None:
         return False
-    gpu_idx, gpu_uuid = selected
+    return _spawn_gpu_worker(selected, model_name, _detect_gpu_compute(selected[0]), engine, quality)
 
-    compute = _detect_gpu_compute(gpu_idx)
+
+def _spawn_gpu_worker(selected: tuple[int, str], model_name: str, compute: str,
+                      engine: str, quality: str) -> bool:
+    """Start the worker process on the chosen card and wait until it is ready."""
+    global _gpu_process, _gpu_request_queue, _gpu_result_queue, _gpu_device_index, _gpu_model_name, _gpu_uuid
+    global _gpu_engine, _gpu_quality
+    gpu_idx, gpu_uuid = selected
     _gpu_device_index = gpu_idx
     _gpu_uuid = gpu_uuid
     _gpu_model_name = model_name
+    _gpu_engine = engine
+    _gpu_quality = quality if engine == "parakeet" else ""
 
     _gpu_request_queue = multiprocessing.Queue()
     _gpu_result_queue = multiprocessing.Queue()
 
     _gpu_process = multiprocessing.Process(
         target=_gpu_worker,
-        args=(_gpu_request_queue, _gpu_result_queue, gpu_idx, gpu_uuid, model_name, compute),
+        args=(_gpu_request_queue, _gpu_result_queue, gpu_idx, gpu_uuid, model_name, compute,
+              engine, quality),
         daemon=True,
-        name=f"whisper-gpu-{gpu_idx}",
+        name=f"{engine}-gpu-{gpu_idx}",
     )
     _gpu_process.start()
 
-    # Wait for ready signal
+    # Wait for ready signal (the first Parakeet start also downloads the model)
     try:
-        msg = _gpu_result_queue.get(timeout=120)
+        msg = _gpu_result_queue.get(timeout=600 if engine == "parakeet" else 120)
         if msg.get("status") == "ready":
-            print(f"[Whisper] GPU worker ready on GPU {gpu_idx}", flush=True)
+            print(f"[Whisper] GPU worker ({engine}) ready on GPU {gpu_idx}", flush=True)
             return True
     except Exception:
         pass
 
-    print("[Whisper] GPU worker failed to start", flush=True)
+    print(f"[Whisper] GPU worker ({engine}) failed to start", flush=True)
     _kill_gpu_worker()
     return False
 
@@ -431,6 +584,7 @@ def _start_gpu_worker() -> bool:
 def _kill_gpu_worker():
     """Kill the GPU child process to fully release CUDA context + VRAM."""
     global _gpu_process, _gpu_request_queue, _gpu_result_queue, _gpu_device_index, _gpu_model_name, _gpu_uuid
+    global _gpu_engine, _gpu_quality
 
     if _gpu_process is not None:
         gpu_idx = _gpu_device_index
@@ -469,6 +623,8 @@ def _kill_gpu_worker():
     _gpu_device_index = None
     _gpu_uuid = ""
     _gpu_model_name = ""
+    _gpu_engine = ""
+    _gpu_quality = ""
 
 
 def _reset_gpu_ttl():
@@ -486,13 +642,24 @@ def _reset_gpu_ttl():
 
 
 def _transcribe_gpu(audio_path: str, language: str,
-                    return_segments: bool = False) -> dict | None:
+                    return_segments: bool = False,
+                    engine: str = "whisper", quality: str = "fp32") -> dict | None:
     """Transcribe using GPU child process."""
     global _gpu_busy
     with _gpu_lock:
+        alive = _gpu_process is not None and _gpu_process.is_alive()
+        # The worker holds one engine; another one means a swap — unless a
+        # job is still running on it, then this request gets the usual 503
+        # and the caller falls back to the CPU.
+        wanted = (engine, quality if engine == "parakeet" else "")
+        if alive and (_gpu_engine, _gpu_quality) != wanted:
+            if _gpu_busy:
+                return None
+            _kill_gpu_worker()
+            alive = False
         # Start worker if not running
-        if _gpu_process is None or not _gpu_process.is_alive():
-            if not _start_gpu_worker():
+        if not alive:
+            if not _start_gpu_worker(engine, quality):
                 return None
 
         # Send job
@@ -1002,7 +1169,7 @@ function msg(text, bg) {{
 @app.route("/health", methods=["GET"])
 def health():
     """Health check — reports model status per device."""
-    cpu_loaded = _model_cpu is not None
+    cpu_loaded = _model_cpu is not None or _parakeet_cpu is not None
     gpu_alive = _gpu_process is not None and _gpu_process.is_alive()
     if cpu_loaded or gpu_alive:
         status, model_loaded = "ok", True
@@ -1015,11 +1182,13 @@ def health():
         "status": status,
         "model_loaded": model_loaded,
         "cpu_loaded": cpu_loaded,
-        "cpu_model": _cpu_model_name if cpu_loaded else _config["cpu_model"],
+        "cpu_model": _cpu_model_name if _model_cpu is not None else _config["cpu_model"],
         "gpu_loaded": gpu_alive,
         "gpu_model": _gpu_model_name if gpu_alive else _config["gpu_model"],
         "gpu_device_index": _gpu_device_index,
         "gpu_ttl_minutes": _config["gpu_ttl_minutes"],
+        "engine": _config["engine"],
+        "gpu_engine": _gpu_engine if gpu_alive else None,
     })
 
 
@@ -1034,6 +1203,8 @@ def transcribe():
         diarize:      "1" to label speakers (default: off — pointless for
                       short voice commands, only worth it for interviews)
         num_speakers: Optional hint if the speaker count is known
+        engine:       "whisper" or "parakeet" (default: STT_ENGINE)
+        quality:      Parakeet only — "fp32" or "int8" (default: STT_QUALITY)
     """
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
@@ -1052,6 +1223,12 @@ def transcribe():
 
     if device not in ("cpu", "cuda"):
         return jsonify({"error": f"Invalid device: {device}. Use 'cpu' or 'cuda'"}), 400
+    engine = request.form.get("engine", _config["engine"])
+    quality = request.form.get("quality", _config["quality"])
+    if engine not in ENGINES:
+        return jsonify({"error": f"Invalid engine: {engine}. Use one of {ENGINES}"}), 400
+    if quality not in PARAKEET_QUALITIES:
+        return jsonify({"error": f"Invalid quality: {quality}. Use one of {PARAKEET_QUALITIES}"}), 400
 
     suffix = Path(audio_file.filename or "audio.wav").suffix or ".wav"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -1064,8 +1241,11 @@ def transcribe():
         # decode it once here instead of twice in parallel (SSOT for the
         # decoded audio). Without diarization Whisper decodes internally as
         # before, so nothing changes for the common short-command case.
-        if diarize:
+        # Parakeet (onnx-asr) reads only WAV, so it always gets the decoded file.
+        if diarize or engine == "parakeet":
             work_path = _decode_to_wav16k(tmp_path)
+            if engine == "parakeet" and work_path == tmp_path:
+                return jsonify({"error": "Audio could not be decoded to 16 kHz WAV"}), 500
 
         # Queue diarization FIRST so it runs on its own card while Whisper
         # transcribes — the two jobs never touch, so the wall-clock cost of
@@ -1077,10 +1257,14 @@ def transcribe():
         if diarize and not diarize_queued:
             print("[Diarize] Could not start — returning plain transcript", flush=True)
 
-        if device == "cpu":
-            result = _transcribe_cpu(work_path, language, return_segments=diarize_queued)
+        if device == "cuda":
+            result = _transcribe_gpu(work_path, language, return_segments=diarize_queued,
+                                     engine=engine, quality=quality)
+        elif engine == "parakeet":
+            result = _transcribe_parakeet_cpu(work_path, language, quality,
+                                              return_segments=diarize_queued)
         else:
-            result = _transcribe_gpu(work_path, language, return_segments=diarize_queued)
+            result = _transcribe_cpu(work_path, language, return_segments=diarize_queued)
 
         if result is None:
             # 503 (not 500): tells the client "GPU temporarily unavailable,
@@ -1119,7 +1303,9 @@ def status():
     result = {
         **_config,
         "cpu_loaded": _model_cpu is not None,
+        "parakeet_cpu_loaded": _parakeet_cpu_quality if _parakeet_cpu is not None else None,
         "gpu_loaded": gpu_alive,
+        "gpu_engine": _gpu_engine if gpu_alive else None,
         "gpu_busy": _gpu_busy,
         "gpu_device_index": _gpu_device_index,
         "gpu_worker_pid": _gpu_process.pid if gpu_alive else None,
@@ -1128,6 +1314,8 @@ def status():
         "gpu_model_loaded": _gpu_model_name if gpu_alive else None,
         # SSOT for clients building a model dropdown (AIfred STT tab).
         "available_models": AVAILABLE_MODELS,
+        "engines": ENGINES,
+        "parakeet_qualities": PARAKEET_QUALITIES,
     }
 
     if _last_gpu_request > 0:
@@ -1143,7 +1331,7 @@ def status():
 @app.route("/unload", methods=["POST"])
 def unload():
     """Unload model(s). Query param device: cpu, gpu, cuda, or all (default)."""
-    global _model_cpu
+    global _model_cpu, _parakeet_cpu, _parakeet_cpu_quality
     device = request.args.get("device", "all")
     unloaded = []
 
@@ -1170,6 +1358,11 @@ def unload():
         _model_cpu = None
         gc.collect()
         unloaded.append("cpu")
+    if device in ("cpu", "all") and _parakeet_cpu is not None:
+        _parakeet_cpu = None
+        _parakeet_cpu_quality = ""
+        gc.collect()
+        unloaded.append("parakeet-cpu")
 
     return jsonify({"success": True, "unloaded": unloaded})
 
@@ -1178,7 +1371,8 @@ def unload():
 def config_endpoint():
     """Get or update runtime configuration."""
     if request.method == "GET":
-        return jsonify({**_config, "available_models": AVAILABLE_MODELS})
+        return jsonify({**_config, "available_models": AVAILABLE_MODELS,
+                        "engines": ENGINES, "parakeet_qualities": PARAKEET_QUALITIES})
 
     data = request.get_json(silent=True) or {}
     changed = []
@@ -1216,6 +1410,12 @@ def config_endpoint():
     if "num_speakers" in data:
         _config["num_speakers"] = max(0, min(10, int(data["num_speakers"])))
         changed.append("num_speakers")
+    if data.get("engine") in ENGINES:
+        _config["engine"] = data["engine"]
+        changed.append("engine")
+    if data.get("quality") in PARAKEET_QUALITIES:
+        _config["quality"] = data["quality"]
+        changed.append("quality")
 
     print(f"[Whisper] Config updated: {', '.join(changed)}", flush=True)
     return jsonify({"success": True, "changed": changed, "config": _config})
@@ -1223,11 +1423,24 @@ def config_endpoint():
 
 # ── Startup ──────────────────────────────────────────────────
 
+if _config["engine"] not in ENGINES or _config["quality"] not in PARAKEET_QUALITIES:
+    raise SystemExit(f"STT_ENGINE must be one of {ENGINES} and STT_QUALITY one of "
+                     f"{PARAKEET_QUALITIES} (got {_config['engine']!r}, {_config['quality']!r})")
+
 if EAGER_LOAD:
     def _eager_load():
+        global _parakeet_cpu, _parakeet_cpu_quality
         time.sleep(2)
-        _load_cpu_model()
+        # Only the default engine stays loaded from the start; the other one
+        # loads on its first request.
+        if _config["engine"] == "parakeet":
+            with _parakeet_cpu_lock:
+                _parakeet_cpu = _load_parakeet(_config["quality"], "CPUExecutionProvider")
+                _parakeet_cpu_quality = _config["quality"]
+        else:
+            _load_cpu_model()
     threading.Thread(target=_eager_load, daemon=True).start()
 
-print(f'[Whisper] Server starting — cpu={_config["cpu_model"]}, gpu={_config["gpu_model"]}, '
+print(f'[Whisper] Server starting — engine={_config["engine"]} ({_config["quality"]}), '
+      f'cpu={_config["cpu_model"]}, gpu={_config["gpu_model"]}, '
       f'eager_load={EAGER_LOAD}, gpu_ttl={_config["gpu_ttl_minutes"]}min', flush=True)

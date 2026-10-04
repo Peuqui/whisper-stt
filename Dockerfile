@@ -20,7 +20,9 @@ RUN pip install --no-cache-dir \
     ctranslate2==4.8.2 \
     numpy==2.5.3 \
     nvidia-cublas-cu12==12.6.4.1 \
-    nvidia-cudnn-cu12==9.10.2.21
+    nvidia-cudnn-cu12==9.10.2.21 \
+    onnxruntime==1.23.2 \
+    onnx-asr==0.12.0
 
 # Speaker diarization (optional feature, own worker process on its own GPU).
 # pyannote.audio pulls in torch/torchaudio — deliberately kept in the SAME
@@ -44,8 +46,16 @@ RUN pip install --no-cache-dir torch==2.8.0 torchaudio==2.8.0 \
  && pip install --no-cache-dir --force-reinstall torch==2.8.0 torchaudio==2.8.0 \
         --index-url https://download.pytorch.org/whl/cu126
 
-# Make NVIDIA libs discoverable at runtime
-ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+# Parakeet on the GPU: onnxruntime-gpu installed LAST with --force-reinstall —
+# the CPU onnxruntime (faster-whisper's VAD needs the package) shares its module
+# directory, and the GPU build's files must win. 1.23.2: from 1.27 on the CUDA
+# provider is built for CUDA 13, whose cuDNN dropped Volta (V100); onnx-asr
+# excludes 1.24.1, 1.25.* and 1.26.0. Its CUDA 12 libs come with torch (cu126).
+RUN pip install --no-cache-dir --no-deps --force-reinstall onnxruntime-gpu==1.23.2
+
+# Make NVIDIA libs discoverable at runtime (CUDA runtime, cuFFT and cuRAND for
+# onnxruntime's CUDA provider)
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.12/site-packages/nvidia/cufft/lib:/usr/local/lib/python3.12/site-packages/nvidia/curand/lib:${LD_LIBRARY_PATH}
 
 # Copy server
 COPY server.py /app/server.py
