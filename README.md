@@ -3,7 +3,7 @@
 Speech-to-text as a small HTTP service in Docker, built on
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper). One running container serves
 every client on the machine — [AIfred Intelligence](https://github.com/Peuqui/AIfred-Intelligence)
-and Agent-Orc use it for voice input.
+and [Agent-Orc](https://github.com/Peuqui/Agent-Orc) use it for voice input.
 
 [Deutsche Version](README.de.md)
 

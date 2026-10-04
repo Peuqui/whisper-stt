@@ -3,7 +3,7 @@
 Spracherkennung als kleiner HTTP-Dienst in Docker, auf Basis von
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Ein laufender Container bedient alle
 Programme auf dem Rechner – [AIfred Intelligence](https://github.com/Peuqui/AIfred-Intelligence)
-und Agent-Orc nutzen ihn für die Spracheingabe.
+und [Agent-Orc](https://github.com/Peuqui/Agent-Orc) nutzen ihn für die Spracheingabe.
 
 [English version](README.md)
 
