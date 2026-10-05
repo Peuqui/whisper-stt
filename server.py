@@ -28,7 +28,6 @@ import time
 import tempfile
 import threading
 from pathlib import Path
-from typing import Optional
 
 from flask import Flask, request, jsonify
 
@@ -596,7 +595,7 @@ def _kill_gpu_worker():
         except Exception:
             pass
         _gpu_process = None
-        print(f"[Whisper] GPU worker killed — VRAM fully released", flush=True)
+        print("[Whisper] GPU worker killed — VRAM fully released", flush=True)
 
     if _gpu_request_queue is not None:
         try:
@@ -1019,6 +1018,14 @@ def _format_speaker_text(merged: list) -> str:
 
 # ── Web-UI ───────────────────────────────────────────────────
 
+def _log_client(action: str, **details: str) -> None:
+    """Who asked for what — the service has no access log, and the caller of a GPU load
+    would otherwise stay unknown."""
+    fields = " ".join(f"{key}={value}" for key, value in details.items())
+    print(f"[Request] {action} {fields} from={request.remote_addr} "
+          f"agent={request.user_agent.string!r}", flush=True)
+
+
 @app.route("/", methods=["GET"])
 def index():
     """Web-UI for status, model management, and settings."""
@@ -1230,6 +1237,8 @@ def transcribe():
     if quality not in PARAKEET_QUALITIES:
         return jsonify({"error": f"Invalid quality: {quality}. Use one of {PARAKEET_QUALITIES}"}), 400
 
+    _log_client("transcribe", device=device, engine=engine, diarize=str(diarize))
+
     suffix = Path(audio_file.filename or "audio.wav").suffix or ".wav"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         audio_file.save(tmp)
@@ -1334,6 +1343,7 @@ def unload():
     global _model_cpu, _parakeet_cpu, _parakeet_cpu_quality
     device = request.args.get("device", "all")
     unloaded = []
+    _log_client("unload", device=device, force=request.args.get("force", "0"))
 
     if device in ("gpu", "cuda", "all"):
         # A transcription in flight is not killed silently — callers get a
