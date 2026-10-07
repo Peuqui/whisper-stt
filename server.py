@@ -162,12 +162,17 @@ def _load_cpu_model():
     print(f"[Whisper] Model loaded on cpu in {time.time() - t0:.1f}s", flush=True)
 
 
+def _ensure_cpu_model():
+    """Whisper CPU model of the current config; the caller holds _cpu_lock. Loads when
+    nothing is loaded or the configured model changed."""
+    if _model_cpu is None or _cpu_model_name != _config["cpu_model"]:
+        _load_cpu_model()
+
+
 def _transcribe_cpu(audio_path: str, language: str, return_segments: bool = False) -> dict:
     """Transcribe using CPU model (main process)."""
-    global _model_cpu
     with _cpu_lock:
-        if _model_cpu is None:
-            _load_cpu_model()
+        _ensure_cpu_model()
         model = _model_cpu
 
     t0 = time.time()
@@ -639,6 +644,26 @@ def _reset_gpu_ttl():
     if _gpu_ttl_timer is not None:
         _gpu_ttl_timer.cancel()
     _gpu_ttl_timer = threading.Timer(ttl * 60, _kill_gpu_worker)
+    _gpu_ttl_timer.daemon = True
+    _gpu_ttl_timer.start()
+
+
+def _rearm_gpu_ttl():
+    """Apply a changed gpu_ttl_minutes to the running timer at once, counted from the
+    last GPU request (idle time already beyond the new TTL releases the GPU now). A job
+    in flight needs nothing: its result re-arms the timer."""
+    global _gpu_ttl_timer
+    if _gpu_ttl_timer is not None:
+        _gpu_ttl_timer.cancel()
+        _gpu_ttl_timer = None
+    ttl = _config["gpu_ttl_minutes"]
+    if ttl <= 0 or _gpu_busy or _gpu_process is None or not _gpu_process.is_alive():
+        return
+    remaining = ttl * 60 - (time.time() - _last_gpu_request)
+    if remaining <= 0:
+        _kill_gpu_worker()
+        return
+    _gpu_ttl_timer = threading.Timer(remaining, _kill_gpu_worker)
     _gpu_ttl_timer.daemon = True
     _gpu_ttl_timer.start()
 
@@ -1139,7 +1164,7 @@ input[type=number] {{ width: 70px; text-align: right; }}
   <div class="btn-row">
     <button class="btn btn-save" onclick="saveConfig()">Save Settings</button>
   </div>
-  <p style="color:#666; font-size:11px; margin:8px 0 0 0;">Model change requires unload + reload to take effect.</p>
+  <p style="color:#666; font-size:11px; margin:8px 0 0 0;">A changed engine, CPU model or CPU quality loads right away; the GPU worker picks up a changed engine, model or quality on its next start (unload it to apply now).</p>
 </div>
 
 <div id="msg"></div>
@@ -1454,6 +1479,13 @@ def config_endpoint():
             _config[key] = data[key]
             changed.append(key)
 
+    if "gpu_ttl_minutes" in changed:
+        _rearm_gpu_ttl()
+    # The CPU model stays resident: a changed engine/model/quality loads now, so the
+    # next request does not wait for it.
+    if EAGER_LOAD and {"engine", "cpu_model", "cpu_quality", "model (both)"} & set(changed):
+        threading.Thread(target=_preload_cpu, daemon=True, name="cpu-preload").start()
+
     print(f"[Whisper] Config updated: {', '.join(changed)}", flush=True)
     return jsonify({"success": True, "changed": changed, "config": _config})
 
@@ -1466,18 +1498,28 @@ if (_config["engine"] not in ENGINES or _config["cpu_quality"] not in PARAKEET_Q
                      f"{PARAKEET_QUALITIES} (got {_config['engine']!r}, {_config['cpu_quality']!r}, "
                      f"{_config['gpu_quality']!r})")
 
-if EAGER_LOAD:
-    def _eager_load():
-        global _parakeet_cpu, _parakeet_cpu_quality
-        time.sleep(2)
-        # Only the default engine stays loaded from the start; the other one
-        # loads on its first request.
-        if _config["engine"] == "parakeet":
-            with _parakeet_cpu_lock:
+def _preload_cpu():
+    """Load the CPU model of the configured engine now and drop the other engine's CPU
+    model, which would only sit in RAM. SSOT for the start and for config changes."""
+    global _model_cpu, _cpu_model_name, _parakeet_cpu, _parakeet_cpu_quality
+    if _config["engine"] == "parakeet":
+        with _cpu_lock:
+            _model_cpu, _cpu_model_name = None, ""
+        with _parakeet_cpu_lock:
+            if _parakeet_cpu is None or _parakeet_cpu_quality != _config["cpu_quality"]:
                 _parakeet_cpu = _load_parakeet(_config["cpu_quality"], "CPUExecutionProvider")
                 _parakeet_cpu_quality = _config["cpu_quality"]
-        else:
-            _load_cpu_model()
+    else:
+        with _parakeet_cpu_lock:
+            _parakeet_cpu, _parakeet_cpu_quality = None, ""
+        with _cpu_lock:
+            _ensure_cpu_model()
+
+
+if EAGER_LOAD:
+    def _eager_load():
+        time.sleep(2)
+        _preload_cpu()
     threading.Thread(target=_eager_load, daemon=True).start()
 
 print(f'[Whisper] Server starting — engine={_config["engine"]}, '
