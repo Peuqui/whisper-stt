@@ -1085,10 +1085,18 @@ def _log_client(action: str, **details: str) -> None:
 @app.route("/", methods=["GET"])
 def index():
     """Web-UI for status, model management, and settings."""
-    cpu_loaded = _model_cpu is not None
     gpu_alive = _gpu_process is not None and _gpu_process.is_alive()
-    cpu_badge = '<span style="color:#4CAF50">loaded</span>' if cpu_loaded else '<span style="color:#999">idle</span>'
-    gpu_badge = '<span style="color:#4CAF50">loaded</span>' if gpu_alive else '<span style="color:#999">idle</span>'
+    # What is really in memory — "parakeet-fp32", "medium", or nothing (idle).
+    cpu_loaded_name = (f"parakeet-{_parakeet_cpu_quality}" if _parakeet_cpu is not None
+                       else _cpu_model_name if _model_cpu is not None else "")
+    gpu_loaded_name = _gpu_model_name if gpu_alive else ""
+
+    def badge(loaded_name: str) -> str:
+        return (f'<span style="color:#4CAF50">{loaded_name}</span>' if loaded_name
+                else '<span style="color:#999">idle</span>')
+
+    cpu_badge = badge(cpu_loaded_name)
+    gpu_badge = badge(gpu_loaded_name)
 
     cpu_model_options = "".join(
         f'<option value="{m}"{" selected" if m == _config["cpu_model"] else ""}>{m}</option>'
@@ -1142,8 +1150,8 @@ input[type=number] {{ width: 70px; text-align: right; }}
 <p style="color:#888; font-size:12px; margin-top:0;">faster-whisper Docker Service</p>
 
 <div class="card">
-  <div class="row"><label>CPU Model:</label> {cpu_badge}</div>
-  <div class="row"><label>GPU Worker:</label> {gpu_badge}{f' (GPU {_gpu_device_index})' if gpu_alive and _gpu_device_index is not None else ''}</div>
+  <div class="row"><label>CPU:</label> {cpu_badge}</div>
+  <div class="row"><label>GPU:</label> {gpu_badge}{f' (GPU {_gpu_device_index})' if gpu_alive and _gpu_device_index is not None else ''}</div>
   <div class="btn-row">
     <button class="btn btn-load" onclick="load('cpu')">Load CPU</button>
     <button class="btn btn-unload" onclick="unload('cpu')">Unload CPU</button>
@@ -1154,26 +1162,26 @@ input[type=number] {{ width: 70px; text-align: right; }}
 
 <h2>Models</h2>
 <div class="card">
-  <div class="row"><label>Engine</label> <select id="cfg-engine">{engine_options}</select></div>
-  <p style="color:#666; font-size:11px; margin:8px 0 0 0;">Whisper uses the models below, Parakeet has one model with a quality per device.</p>
+  <div class="row"><label>Engine</label> <select id="cfg-engine" onchange="applyEngine()">{engine_options}</select></div>
+  <p style="color:#666; font-size:11px; margin:8px 0 0 0;">Only the settings of the chosen engine are shown: Whisper has models and decoding options, Parakeet one model with a quality per device.</p>
 </div>
 <div style="display:flex; gap:12px;">
   <div class="card" style="flex:1;">
     <div style="font-size:13px; font-weight:600; color:#4CAF50; margin-bottom:8px;">CPU Engine</div>
-    <div class="row"><label>Whisper model</label> <select id="cfg-cpu-model">{cpu_model_options}</select></div>
-    <div class="row"><label>Parakeet quality</label> <select id="cfg-cpu-quality">{cpu_quality_options}</select></div>
+    <div class="row whisper-only"><label>Whisper model</label> <select id="cfg-cpu-model">{cpu_model_options}</select></div>
+    <div class="row parakeet-only"><label>Parakeet quality</label> <select id="cfg-cpu-quality">{cpu_quality_options}</select></div>
   </div>
   <div class="card" style="flex:1;">
     <div style="font-size:13px; font-weight:600; color:#FF9800; margin-bottom:8px;">GPU Engine</div>
-    <div class="row"><label>Whisper model</label> <select id="cfg-gpu-model">{gpu_model_options}</select></div>
-    <div class="row"><label>Parakeet quality</label> <select id="cfg-gpu-quality">{gpu_quality_options}</select></div>
+    <div class="row whisper-only"><label>Whisper model</label> <select id="cfg-gpu-model">{gpu_model_options}</select></div>
+    <div class="row parakeet-only"><label>Parakeet quality</label> <select id="cfg-gpu-quality">{gpu_quality_options}</select></div>
     <div class="row"><label>TTL (min)</label> <input type="number" id="cfg-ttl" value="{_config["gpu_ttl_minutes"]}" min="0" max="1440"></div>
   </div>
 </div>
 
 <h2>Transcription</h2>
 <div class="card">
-  <div class="row"><label>Beam Size</label> <input type="number" id="cfg-beam" value="{_config["beam_size"]}" min="1" max="20"></div>
+  <div class="row whisper-only"><label>Beam Size</label> <input type="number" id="cfg-beam" value="{_config["beam_size"]}" min="1" max="20"></div>
   <div class="row"><label>Default Language</label>
     <select id="cfg-lang">
       <option value="de"{"" if _config["language"] != "de" else " selected"}>Deutsch</option>
@@ -1181,13 +1189,13 @@ input[type=number] {{ width: 70px; text-align: right; }}
       <option value="auto"{"" if _config["language"] != "auto" else " selected"}>Auto-Detect</option>
     </select>
   </div>
-  <div class="row"><label>VAD Filter</label>
+  <div class="row whisper-only"><label>VAD Filter</label>
     <label class="toggle"><input type="checkbox" id="cfg-vad" {"checked" if _config["vad_filter"] else ""}><span class="slider"></span></label>
   </div>
-  <div class="row"><label>Condition on Previous</label>
+  <div class="row whisper-only"><label>Condition on Previous</label>
     <label class="toggle"><input type="checkbox" id="cfg-cond" {"checked" if _config["condition_on_previous_text"] else ""}><span class="slider"></span></label>
   </div>
-  <div class="row"><label>Initial Prompt (auto/leer/Text)</label> <input type="text" id="cfg-prompt" value="{_config["initial_prompt"]}" style="width:220px"></div>
+  <div class="row whisper-only"><label>Initial Prompt (auto/leer/Text)</label> <input type="text" id="cfg-prompt" value="{_config["initial_prompt"]}" style="width:220px"></div>
   <div class="row"><label>Sprecheranzahl (0 = auto)</label> <input type="number" id="cfg-numspk" value="{_config["num_speakers"]}" min="0" max="10"></div>
   <div class="btn-row">
     <button class="btn btn-save" onclick="saveConfig()">Save Settings</button>
@@ -1198,6 +1206,12 @@ input[type=number] {{ width: 70px; text-align: right; }}
 <div id="msg"></div>
 
 <script>
+function applyEngine() {{
+  const engine = document.getElementById('cfg-engine').value;
+  document.querySelectorAll('.whisper-only').forEach(el => {{ el.style.display = engine === 'whisper' ? '' : 'none'; }});
+  document.querySelectorAll('.parakeet-only').forEach(el => {{ el.style.display = engine === 'parakeet' ? '' : 'none'; }});
+}}
+applyEngine();
 async function load(device) {{
   msg('Loading ' + device + '...', '#01579b');
   const fd = new FormData();
