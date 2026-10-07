@@ -63,7 +63,7 @@ Der Dienst hört auf Port **5080**. Die Modelle liegen im Docker-Volume `whisper
 | `diarize` | `1`, um Sprecher zu kennzeichnen (Standard: aus) |
 | `num_speakers` | Optionaler Hinweis, wenn die Sprecherzahl bekannt ist |
 | `engine` | `whisper` oder `parakeet`; Standard `STT_ENGINE` |
-| `quality` | nur Parakeet: `fp32` oder `int8`; Standard `STT_QUALITY` |
+| `quality` | nur Parakeet: `fp32` oder `int8`; Standard `STT_CPU_QUALITY` bzw. `STT_GPU_QUALITY`, je nach Gerät |
 
 Die Antwort ist JSON mit `text`, der benötigten Zeit und dem verwendeten Gerät. Fehler: `400`
 bei fehlender Datei oder ungültigem Gerät, `503`, wenn keine GPU Platz für ein Modell hat,
@@ -89,7 +89,7 @@ In `docker-compose.yml` oder als Umgebungsvariablen beim Start von Compose:
 | `WHISPER_CPU_COMPUTE` / `WHISPER_GPU_COMPUTE` | `int8` / `float16` | Rechengenauigkeit |
 | `DIARIZE_MODEL` | `pyannote/speaker-diarization-community-1` | Pipeline der Sprechererkennung |
 | `STT_ENGINE` | `whisper` | Engine, wenn eine Anfrage keine nennt: `whisper` oder `parakeet` |
-| `STT_QUALITY` | `fp32` | Parakeet-Qualität, wenn eine Anfrage keine nennt: `fp32` oder `int8` |
+| `STT_CPU_QUALITY` / `STT_GPU_QUALITY` | `fp32` / `fp32` | Parakeet-Qualität auf CPU / GPU, wenn eine Anfrage keine nennt: `fp32` oder `int8` |
 | `PARAKEET_CHUNK_S` / `PARAKEET_MERGE_SILENCE_MS` | `60` / `5000` | Parakeet schneidet das Audio an Sprechpausen in Stücke von höchstens dieser Länge und fasst kürzere Pausen zusammen |
 | `PARAKEET_MIN_VRAM_MIB` | `4500` | Freier VRAM, den eine Karte für Parakeet braucht |
 

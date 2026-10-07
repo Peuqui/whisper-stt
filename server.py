@@ -66,10 +66,13 @@ _config = {
     # Per-request num_speakers still wins. Set to 2 before transcribing an
     # interview and the greeting ping-pong stops collapsing into one speaker.
     "num_speakers": int(os.environ.get("WHISPER_NUM_SPEAKERS", "0")),
-    # Default engine/quality when a request names none — the API stays
-    # unchanged for clients that never send these fields.
+    # Default engine when a request names none — the API stays unchanged for
+    # clients that never send this field. Parakeet quality is per device
+    # (like cpu_model/gpu_model): int8 is the fast choice for the CPU, fp32 the
+    # accurate one for the GPU.
     "engine": os.environ.get("STT_ENGINE", "whisper"),
-    "quality": os.environ.get("STT_QUALITY", "fp32"),
+    "cpu_quality": os.environ.get("STT_CPU_QUALITY", "fp32"),
+    "gpu_quality": os.environ.get("STT_GPU_QUALITY", "fp32"),
 }
 
 # Whisper continues whatever "style" the transcript has so far. At the very
@@ -1043,6 +1046,19 @@ def index():
         for m in AVAILABLE_MODELS
     )
 
+    engine_options = "".join(
+        f'<option value="{e}"{" selected" if e == _config["engine"] else ""}>{e}</option>'
+        for e in ENGINES
+    )
+    cpu_quality_options = "".join(
+        f'<option value="{q}"{" selected" if q == _config["cpu_quality"] else ""}>{q}</option>'
+        for q in PARAKEET_QUALITIES
+    )
+    gpu_quality_options = "".join(
+        f'<option value="{q}"{" selected" if q == _config["gpu_quality"] else ""}>{q}</option>'
+        for q in PARAKEET_QUALITIES
+    )
+
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Whisper STT</title>
 <style>
@@ -1084,14 +1100,20 @@ input[type=number] {{ width: 70px; text-align: right; }}
 </div>
 
 <h2>Models</h2>
+<div class="card">
+  <div class="row"><label>Engine</label> <select id="cfg-engine">{engine_options}</select></div>
+  <p style="color:#666; font-size:11px; margin:8px 0 0 0;">Whisper uses the models below, Parakeet has one model with a quality per device.</p>
+</div>
 <div style="display:flex; gap:12px;">
   <div class="card" style="flex:1;">
     <div style="font-size:13px; font-weight:600; color:#4CAF50; margin-bottom:8px;">CPU Engine</div>
-    <div class="row"><label>Model</label> <select id="cfg-cpu-model">{cpu_model_options}</select></div>
+    <div class="row"><label>Whisper model</label> <select id="cfg-cpu-model">{cpu_model_options}</select></div>
+    <div class="row"><label>Parakeet quality</label> <select id="cfg-cpu-quality">{cpu_quality_options}</select></div>
   </div>
   <div class="card" style="flex:1;">
     <div style="font-size:13px; font-weight:600; color:#FF9800; margin-bottom:8px;">GPU Engine</div>
-    <div class="row"><label>Model</label> <select id="cfg-gpu-model">{gpu_model_options}</select></div>
+    <div class="row"><label>Whisper model</label> <select id="cfg-gpu-model">{gpu_model_options}</select></div>
+    <div class="row"><label>Parakeet quality</label> <select id="cfg-gpu-quality">{gpu_quality_options}</select></div>
     <div class="row"><label>TTL (min)</label> <input type="number" id="cfg-ttl" value="{_config["gpu_ttl_minutes"]}" min="0" max="1440"></div>
   </div>
 </div>
@@ -1146,6 +1168,9 @@ async function unload(device) {{
 }}
 async function saveConfig() {{
   const cfg = {{
+    engine: document.getElementById('cfg-engine').value,
+    cpu_quality: document.getElementById('cfg-cpu-quality').value,
+    gpu_quality: document.getElementById('cfg-gpu-quality').value,
     cpu_model: document.getElementById('cfg-cpu-model').value,
     gpu_model: document.getElementById('cfg-gpu-model').value,
     gpu_ttl_minutes: parseInt(document.getElementById('cfg-ttl').value) || 30,
@@ -1211,7 +1236,8 @@ def transcribe():
                       short voice commands, only worth it for interviews)
         num_speakers: Optional hint if the speaker count is known
         engine:       "whisper" or "parakeet" (default: STT_ENGINE)
-        quality:      Parakeet only — "fp32" or "int8" (default: STT_QUALITY)
+        quality:      Parakeet only — "fp32" or "int8" for this request
+                      (default: STT_CPU_QUALITY / STT_GPU_QUALITY, by device)
     """
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
@@ -1231,7 +1257,7 @@ def transcribe():
     if device not in ("cpu", "cuda"):
         return jsonify({"error": f"Invalid device: {device}. Use 'cpu' or 'cuda'"}), 400
     engine = request.form.get("engine", _config["engine"])
-    quality = request.form.get("quality", _config["quality"])
+    quality = request.form.get("quality", _config[f"{'gpu' if device == 'cuda' else 'cpu'}_quality"])
     if engine not in ENGINES:
         return jsonify({"error": f"Invalid engine: {engine}. Use one of {ENGINES}"}), 400
     if quality not in PARAKEET_QUALITIES:
@@ -1423,9 +1449,10 @@ def config_endpoint():
     if data.get("engine") in ENGINES:
         _config["engine"] = data["engine"]
         changed.append("engine")
-    if data.get("quality") in PARAKEET_QUALITIES:
-        _config["quality"] = data["quality"]
-        changed.append("quality")
+    for key in ("cpu_quality", "gpu_quality"):
+        if data.get(key) in PARAKEET_QUALITIES:
+            _config[key] = data[key]
+            changed.append(key)
 
     print(f"[Whisper] Config updated: {', '.join(changed)}", flush=True)
     return jsonify({"success": True, "changed": changed, "config": _config})
@@ -1433,9 +1460,11 @@ def config_endpoint():
 
 # ── Startup ──────────────────────────────────────────────────
 
-if _config["engine"] not in ENGINES or _config["quality"] not in PARAKEET_QUALITIES:
-    raise SystemExit(f"STT_ENGINE must be one of {ENGINES} and STT_QUALITY one of "
-                     f"{PARAKEET_QUALITIES} (got {_config['engine']!r}, {_config['quality']!r})")
+if (_config["engine"] not in ENGINES or _config["cpu_quality"] not in PARAKEET_QUALITIES
+        or _config["gpu_quality"] not in PARAKEET_QUALITIES):
+    raise SystemExit(f"STT_ENGINE must be one of {ENGINES}, STT_CPU_QUALITY and STT_GPU_QUALITY one of "
+                     f"{PARAKEET_QUALITIES} (got {_config['engine']!r}, {_config['cpu_quality']!r}, "
+                     f"{_config['gpu_quality']!r})")
 
 if EAGER_LOAD:
     def _eager_load():
@@ -1445,12 +1474,12 @@ if EAGER_LOAD:
         # loads on its first request.
         if _config["engine"] == "parakeet":
             with _parakeet_cpu_lock:
-                _parakeet_cpu = _load_parakeet(_config["quality"], "CPUExecutionProvider")
-                _parakeet_cpu_quality = _config["quality"]
+                _parakeet_cpu = _load_parakeet(_config["cpu_quality"], "CPUExecutionProvider")
+                _parakeet_cpu_quality = _config["cpu_quality"]
         else:
             _load_cpu_model()
     threading.Thread(target=_eager_load, daemon=True).start()
 
-print(f'[Whisper] Server starting — engine={_config["engine"]} ({_config["quality"]}), '
-      f'cpu={_config["cpu_model"]}, gpu={_config["gpu_model"]}, '
+print(f'[Whisper] Server starting — engine={_config["engine"]}, '
+      f'cpu={_config["cpu_model"]}/{_config["cpu_quality"]}, gpu={_config["gpu_model"]}/{_config["gpu_quality"]}, '
       f'eager_load={EAGER_LOAD}, gpu_ttl={_config["gpu_ttl_minutes"]}min', flush=True)

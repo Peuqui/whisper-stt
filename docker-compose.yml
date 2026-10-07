@@ -26,9 +26,10 @@ services:
       - WHISPER_GPU_MIN_MODEL=${WHISPER_GPU_MIN_MODEL:-medium}
       # Engine when a request names none: whisper or parakeet (NVIDIA Parakeet
       # TDT 0.6B v3 — 25 European languages, much faster, see README).
-      # Parakeet quality: fp32 (full) or int8 (smaller, more word errors).
+      # Parakeet quality per device: fp32 (full) or int8 (smaller, more word errors).
       - STT_ENGINE=${STT_ENGINE:-whisper}
-      - STT_QUALITY=${STT_QUALITY:-fp32}
+      - STT_CPU_QUALITY=${STT_CPU_QUALITY:-fp32}
+      - STT_GPU_QUALITY=${STT_GPU_QUALITY:-fp32}
       # Compute type per device (int8 for CPU, float16 for GPU)
       - WHISPER_CPU_COMPUTE=int8
       - WHISPER_GPU_COMPUTE=float16

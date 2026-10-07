@@ -63,7 +63,7 @@ and survive rebuilds. The container restarts with Docker (`restart: unless-stopp
 | `diarize` | `1` to label speakers (default off) |
 | `num_speakers` | Optional hint when the number of speakers is known |
 | `engine` | `whisper` or `parakeet`; default `STT_ENGINE` |
-| `quality` | Parakeet only: `fp32` or `int8`; default `STT_QUALITY` |
+| `quality` | Parakeet only: `fp32` or `int8`; default `STT_CPU_QUALITY` or `STT_GPU_QUALITY`, by device |
 
 The answer is JSON with `text`, the time taken and the device used. Errors: `400` for a
 missing file or an invalid device, `503` when no GPU has room for a model, `500` otherwise.
@@ -88,7 +88,7 @@ Set in `docker-compose.yml` or as environment variables when starting compose:
 | `WHISPER_CPU_COMPUTE` / `WHISPER_GPU_COMPUTE` | `int8` / `float16` | Compute types |
 | `DIARIZE_MODEL` | `pyannote/speaker-diarization-community-1` | Diarization pipeline |
 | `STT_ENGINE` | `whisper` | Engine when a request names none: `whisper` or `parakeet` |
-| `STT_QUALITY` | `fp32` | Parakeet quality when a request names none: `fp32` or `int8` |
+| `STT_CPU_QUALITY` / `STT_GPU_QUALITY` | `fp32` / `fp32` | Parakeet quality on the CPU / the GPU when a request names none: `fp32` or `int8` |
 | `PARAKEET_CHUNK_S` / `PARAKEET_MERGE_SILENCE_MS` | `60` / `5000` | Parakeet cuts audio at speech pauses into chunks of at most this length, merging pauses shorter than this |
 | `PARAKEET_MIN_VRAM_MIB` | `4500` | Free VRAM a card needs for Parakeet |
 
