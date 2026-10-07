@@ -52,6 +52,8 @@ services:
     volumes:
       # Persistent HuggingFace model cache
       - whisper_models:/root/.cache/huggingface
+      # Settings changed via /config (survive a restart; the .env only gives the first defaults)
+      - whisper_state:/state
       # pyannote models are gated — reuse the host's HF token instead of
       # copying it into .env. The directory, not the file: a missing file
       # would make Docker create a directory in its place, and every
@@ -68,3 +70,5 @@ services:
 volumes:
   whisper_models:
     name: whisper_models
+  whisper_state:
+    name: whisper_state

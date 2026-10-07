@@ -85,6 +85,7 @@ Set in `docker-compose.yml` or as environment variables when starting compose:
 | `WHISPER_GPU_TTL_MINUTES` | `30` | Idle minutes until the GPU worker is stopped and its VRAM freed; `0` keeps it |
 | `WHISPER_LANGUAGE` | `de` | Default language (`auto` detects it) |
 | `WHISPER_EAGER_LOAD` | `1` | Load the CPU model at start |
+| `STT_CONFIG_FILE` | `/state/config.json` | Where settings changed via `/config` are kept (volume `whisper_state`). The environment only gives the first defaults; once this file exists it wins. Delete it to return to the environment |
 | `WHISPER_CPU_COMPUTE` / `WHISPER_GPU_COMPUTE` | `int8` / `float16` | Compute types |
 | `DIARIZE_MODEL` | `pyannote/speaker-diarization-community-1` | Diarization pipeline |
 | `STT_ENGINE` | `whisper` | Engine when a request names none: `whisper` or `parakeet` |

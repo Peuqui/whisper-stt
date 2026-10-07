@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import gc
 import multiprocessing
+import json
 import os
 import time
 import tempfile
@@ -74,6 +75,33 @@ _config = {
     "cpu_quality": os.environ.get("STT_CPU_QUALITY", "fp32"),
     "gpu_quality": os.environ.get("STT_GPU_QUALITY", "fp32"),
 }
+
+# Settings changed through /config survive a restart: the container cannot write the
+# host's .env, so they live in a file on a volume. The environment only supplies the
+# first defaults; once the file exists it wins. Delete the file to return to the .env.
+_CONFIG_FILE = Path(os.environ.get("STT_CONFIG_FILE", "/state/config.json"))
+
+
+def _load_saved_config() -> None:
+    if not _CONFIG_FILE.exists():
+        return
+    saved = json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
+    unknown = set(saved) - set(_config)
+    if unknown:
+        raise SystemExit(f"{_CONFIG_FILE}: unknown settings {sorted(unknown)} — delete the file or fix it")
+    _config.update(saved)
+    print(f"[Whisper] Settings restored from {_CONFIG_FILE}", flush=True)
+
+
+def _save_config() -> None:
+    """Write all settings atomically; raises on failure so /config answers 500, not 200."""
+    _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _CONFIG_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(_config, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(_CONFIG_FILE)
+
+
+_load_saved_config()
 
 # Whisper continues whatever "style" the transcript has so far. At the very
 # start there is no transcript, so the first 30 s window decides — and fast
@@ -1479,6 +1507,8 @@ def config_endpoint():
             _config[key] = data[key]
             changed.append(key)
 
+    if changed:
+        _save_config()
     if "gpu_ttl_minutes" in changed:
         _rearm_gpu_ttl()
     # The CPU model stays resident: a changed engine/model/quality loads now, so the

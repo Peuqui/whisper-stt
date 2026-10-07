@@ -86,6 +86,7 @@ In `docker-compose.yml` oder als Umgebungsvariablen beim Start von Compose:
 | `WHISPER_GPU_TTL_MINUTES` | `30` | Leerlauf-Minuten, bis der GPU-Worker endet und sein VRAM frei wird; `0` behält ihn |
 | `WHISPER_LANGUAGE` | `de` | Standardsprache (`auto` erkennt sie) |
 | `WHISPER_EAGER_LOAD` | `1` | CPU-Modell beim Start laden |
+| `STT_CONFIG_FILE` | `/state/config.json` | Ablage der über `/config` geänderten Einstellungen (Volume `whisper_state`). Die Umgebung liefert nur die ersten Standardwerte; sobald die Datei existiert, gilt sie. Zum Zurücksetzen löschen |
 | `WHISPER_CPU_COMPUTE` / `WHISPER_GPU_COMPUTE` | `int8` / `float16` | Rechengenauigkeit |
 | `DIARIZE_MODEL` | `pyannote/speaker-diarization-community-1` | Pipeline der Sprechererkennung |
 | `STT_ENGINE` | `whisper` | Engine, wenn eine Anfrage keine nennt: `whisper` oder `parakeet` |
